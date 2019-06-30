@@ -1,15 +1,19 @@
+#! /usr/bin/env python python
+
 import arcade
-from arcade.examples.frametime_plotter import FrametimePlotter
 import math
 import random
-from typing import List
+from pathlib import Path
+from typing import List, Tuple
 # Size of the screen
 SCREEN_WIDTH: int = 1000
 SCREEN_HEIGHT: int = 800
-SCREEN_TITLE: str = "Orbit Trial"
+SCREEN_TITLE: str = "Orbit"
 
-PARTICLE_MAX_SPEED: int = 20  # divide by 10
-PARTICLE_RADIUS: int = 5
+PARTICLE_FILE = Path('./images/asteroid-icon.png')
+PARTICLE_SCALING = 1.0 / 70
+PARTICLE_MAX_SPEED: int = 5  # divide by 10
+PARTICLE_RADIUS: int = 7
 PARTICLE_MASS: int = 10
 
 
@@ -40,12 +44,17 @@ class Vector2d:
     def __repr__(self):
         return 'vector(x->' + str(self.x) + ', y->' + str(self.y) + ')'
 
+    def __getitem__(self, index) -> float:
+        return self.x if index == 0 else self.y
+
+    def get_coord(self) -> Tuple[float, float]:
+        return self.x, self.y
+
     def to_polar(self) -> 'VectorPolar':
         return VectorPolar(math.sqrt(self.x**2 + self.y**2), math.atan2(self.y, self.x))
 
     def rotation_transform(self, phi) -> 'Vector2d':
         v_polar = self.to_polar()
-        # print('polar', v_polar, phi)
         v_polar.phi += phi
         return v_polar.to_cartesian()
 
@@ -78,6 +87,22 @@ class VectorPolar:
         return Vector2d(self.rho * math.cos(self.phi), self.rho * math.sin(self.phi))
 
 
+class FieldIter:
+    def __init__(self, field: 'GravitationalField'):
+        self.field = field
+        self.x = 0
+        self.y = 0
+
+    def __next__(self) -> Tuple[int, int]:
+        self.x += 1
+        if self.x >= self.field._x:
+            self.x = 0
+            self.y += 1
+            if self.y >= self.field._y:
+                raise StopIteration
+        return self.x, self.y
+
+
 class GravitationalField:
     """
     gravitational field as 2d array
@@ -88,12 +113,21 @@ class GravitationalField:
 
         :param inital_value: intial field values, defaults to 0
         """
-        self.x = SCREEN_WIDTH
-        self.y = SCREEN_HEIGHT
-        self.field: List[list] = [x[:] for x in [[inital_value] * self.x] * self.y]
+        self._x = SCREEN_WIDTH
+        self._y = SCREEN_HEIGHT
+        self.field: List[list] = [x[:] for x in [[inital_value] * self._y] * self._x]
+
+    def __iter__(self):
+        return FieldIter(self)
+
+    def get_value(self, x: int, y: int) -> float:
+        return self.field[x][y]
+
+    def set_value(self, x: int, y: int, value: float):
+        self.field[x][y] = value
 
 
-class Particle():
+class Particle(arcade.sprite.Sprite):
     """
     single particle in the simulation
     """
@@ -102,20 +136,24 @@ class Particle():
     impact_parity: bool = True
     count = 0
 
-    def __init__(self, x: float, y: float, delta_x: float, delta_y: float):
+    def __init__(self, x: float, y: float, delta_x: float, delta_y: float, size: int):
+        super().__init__(PARTICLE_FILE, PARTICLE_SCALING*size)
         self.name = 'particle' + str(Particle.count)
         Particle.count += 1
-        self.position = Vector2d(x, y)
-        self.velocity = Vector2d(delta_x, delta_y)
+
+        self.particle_position = Vector2d(x, y)
+        self.particle_velocity = Vector2d(delta_x, delta_y)
+        self.sync_coord()
+
         self.impact_check: bool = not Particle.impact_parity
         self.impact_velocity: Vector2d = None
         self.size = PARTICLE_RADIUS
-        self.mass = PARTICLE_MASS
+        self.mass = size
 
     @staticmethod
     def generate() -> 'Particle':
         """
-        generates a new particle with random location and velocity
+        generates a new particle with random location and particle_velocity
 
         :return: new particle
         """
@@ -123,8 +161,8 @@ class Particle():
             random.randrange(PARTICLE_RADIUS, SCREEN_WIDTH - PARTICLE_RADIUS),
             random.randrange(PARTICLE_RADIUS, SCREEN_HEIGHT - PARTICLE_RADIUS),
             random.randrange(-PARTICLE_MAX_SPEED, PARTICLE_MAX_SPEED)/10.0,
-            random.randrange(-PARTICLE_MAX_SPEED, PARTICLE_MAX_SPEED)/10.0)
-        # return Particle(50, 50, 5, 0)
+            random.randrange(-PARTICLE_MAX_SPEED, PARTICLE_MAX_SPEED)/10.0,
+            PARTICLE_RADIUS)
 
     def checked(self) -> bool:
         """
@@ -134,11 +172,16 @@ class Particle():
         """
         return self.impact_check == Particle.impact_parity
 
-    def update_location(self) -> None:
+    def sync_coord(self) -> None:
+        self.center_x, self.center_y = self.particle_position.get_coord()
+        self.change_x, self.change_y = self.particle_velocity.get_coord()
+
+    def update(self) -> None:
         """
         updates particle's location
         """
-        self.position += self.velocity
+        self.particle_position += self.particle_velocity
+        self.sync_coord()
 
 
 class ImpactHelper:
@@ -150,7 +193,7 @@ class ImpactHelper:
 
     @staticmethod
     def particle_distance(particle_1: 'Particle', particle_2: 'Particle') -> float:
-        return ImpactHelper.point_distance(particle_1.position, particle_2.position)
+        return ImpactHelper.point_distance(particle_1.particle_position, particle_2.particle_position)
 
     @staticmethod
     def is_particle_impact(particle_1: Particle, particle_2: Particle) -> bool:
@@ -158,20 +201,18 @@ class ImpactHelper:
 
     @staticmethod
     def particle_impact_transformation(particle_1: Particle, particle_2: Particle):
-        impact_angle = (particle_1.velocity - particle_2.velocity).to_polar().phi
-        velocity_a = particle_1.velocity.rotation_transform(impact_angle)
-        velocity_b = particle_2.velocity.rotation_transform(impact_angle)
+        impact_angle = (particle_1.particle_velocity - particle_2.particle_velocity).to_polar().phi
+        velocity_a = particle_1.particle_velocity.rotation_transform(impact_angle)
+        velocity_b = particle_2.particle_velocity.rotation_transform(impact_angle)
         return velocity_a, velocity_b, impact_angle
 
     @staticmethod
     def particle_impact_energy(particle_1: Particle, velocity_1: Vector2d, particle_2: Particle, velocity_2: Vector2d, impact_angle: float):
         m1 = particle_1.mass
         m2 = particle_2.mass
-        # print('angle', particle_1.name, impact_angle)
+
         impact_velocity_1 = Vector2d((m1 - m2)/(m1 + m2) * velocity_1.x + 2 * m2/(m1 + m2) * velocity_2.x, velocity_1.y)
         impact_velocity_2 = Vector2d(2 * m2/(m1 + m2) * velocity_1.x - (m1 - m2)/(m1 + m2) * velocity_2.x, velocity_2.y)
-        # print(particle_1.name, particle_1.impact_velocity, impact_velocity_1)
-        # print(particle_1.name, particle_2.impact_velocity, impact_velocity_2)
 
         particle_1.impact_velocity += impact_velocity_1.rotation_transform(-impact_angle)
         particle_2.impact_velocity += impact_velocity_2.rotation_transform(-impact_angle)
@@ -179,68 +220,72 @@ class ImpactHelper:
 
 class Orbit(arcade.Window):
     def __init__(self):
-        self.particle_list = []
-        self.field = GravitationalField()
-        self.frametime_plotter = FrametimePlotter()
+        self.particle_list = None
+        self.field = None
+        self.total_energy = None
         return super().__init__(SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_TITLE)
 
         arcade.set_background_color(arcade.color.BLACK)
 
-    def particle_impact(self, particle_1):
-        particle_1.impact_check = Particle.impact_parity
-
-        if particle_1.position.x < particle_1.size or particle_1.position.x > SCREEN_WIDTH - particle_1.size:
-            particle_1.impact_velocity = Vector2d(-1 * particle_1.velocity.x, particle_1.velocity.y)
-
-        if particle_1.position.y < particle_1.size or particle_1.position.y > SCREEN_HEIGHT - particle_1.size:
-            particle_1.impact_velocity = Vector2d(particle_1.velocity.x, -1 * particle_1.velocity.y)
-
-        particle_2: Particle = None
-        for particle_2 in self.particle_list:
-            if not particle_2.checked() and ImpactHelper.is_particle_impact(particle_1, particle_2):
-                # print('\n\n', particle_2.impact_check, particle_2.impact_parity)
-                particle_1.impact_velocity = Vector2d(0, 0)
-                particle_2.impact_velocity = Vector2d(0, 0)
-                velocity_1, velocity_2, impact_angle = ImpactHelper.particle_impact_transformation(particle_1, particle_2)
-                ImpactHelper.particle_impact_energy(particle_1, velocity_1, particle_2, velocity_2, impact_angle)
-                # print('impact1', particle_1.name, particle_1.position, particle_1.velocity, particle_1.impact_velocity)
-                # print('impact2', particle_1.name, particle_2.position, particle_2.velocity, particle_2.impact_velocity)
-
-        if particle_1.impact_velocity is not None:
-            particle_1.velocity.x = particle_1.impact_velocity.x
-            particle_1.velocity.y = particle_1.impact_velocity.y
-            # print('impact after', particle_1.name, particle_1.position, particle_1.velocity, particle_1.impact_velocity)
-            particle_1.update_location()
-
-        particle_1.impact_velocity = None
+    def setup(self):
+        self.particle_list = arcade.SpriteList()
+        self.field = GravitationalField()
+        self.total_energy = 0
 
     def update_field(self):
         pass
 
-    def on_update(self, delta_time):
-        # print('......................')
+    def particle_impact(self, particle_1):
+        particle_1.impact_check = Particle.impact_parity
+
+        if particle_1.particle_position.x < particle_1.size or particle_1.particle_position.x > SCREEN_WIDTH - particle_1.size:
+            particle_1.impact_velocity = Vector2d(-1 * particle_1.particle_velocity.x, particle_1.particle_velocity.y)
+
+        if particle_1.particle_position.y < particle_1.size or particle_1.particle_position.y > SCREEN_HEIGHT - particle_1.size:
+            particle_1.impact_velocity = Vector2d(particle_1.particle_velocity.x, -1 * particle_1.particle_velocity.y)
+
+        particle_2: Particle = None
+        for particle_2 in self.particle_list:
+            if not particle_2.checked() and ImpactHelper.is_particle_impact(particle_1, particle_2):
+                particle_1.impact_velocity = Vector2d(0, 0)
+                particle_2.impact_velocity = Vector2d(0, 0)
+                velocity_1, velocity_2, impact_angle = ImpactHelper.particle_impact_transformation(particle_1, particle_2)
+                ImpactHelper.particle_impact_energy(particle_1, velocity_1, particle_2, velocity_2, impact_angle)
+
+        if particle_1.impact_velocity is not None:
+            particle_1.particle_velocity.x = particle_1.impact_velocity.x
+            particle_1.particle_velocity.y = particle_1.impact_velocity.y
+            particle_1.update()
+
+        particle_1.impact_velocity = None
+
+    def on_update(self, delta_time: float):
+        self.particle_list.update()
+        self.total_energy = 0
+
+        particle: Particle
         for particle in self.particle_list:
-            particle.update_location()
             self.particle_impact(particle)
+            self.total_energy += ImpactHelper.point_distance(Vector2d(0, 0), particle.particle_velocity)**2 * particle.mass
 
         Particle.impact_parity = not Particle.impact_parity
 
     def on_draw(self):
         arcade.start_render()
+        self.particle_list.draw()
 
-        for particle in self.particle_list:
-            arcade.draw_circle_filled(round(particle.position.x), round(particle.position.y), particle.size, arcade.color.ANTIQUE_WHITE)
+        output = f"Particles: {Particle.count} Energy: {self.total_energy}"
+        arcade.draw_text(output, 10, 20, arcade.color.WHITE, 14)
 
     def on_key_press(self, key, modifiers):
         if key == arcade.key.ESCAPE:
             arcade.close_window()
         elif key == arcade.key.SPACE:
             self.particle_list.append(Particle.generate())
-            self.frametime_plotter.add_event('new particle')
 
 
 if __name__ == "__main__":
     game = Orbit()
-    game.set_update_rate(1/80)
+    game.setup()
+    game.set_update_rate(1/200)
     arcade.run()
-    game.frametime_plotter.show()
