@@ -16,6 +16,8 @@ PARTICLE_MAX_SPEED: int = 5  # divide by 10
 PARTICLE_RADIUS: int = 7
 PARTICLE_MASS: int = 10
 
+IMPACT_OVERLAP_TOLERANCE = 0.1
+
 
 class Vector2d:
     def __init__(self, x: float, y: float):
@@ -200,6 +202,25 @@ class ImpactHelper:
         return ImpactHelper.particle_distance(particle_1, particle_2) <= particle_1.size + particle_2.size
 
     @staticmethod
+    def remove_overlap(particle_1: Particle, particle_2: Particle) -> None:
+        if ((particle_1.size + particle_2.size) - (ImpactHelper.particle_distance(particle_1, particle_2)))/2 <= IMPACT_OVERLAP_TOLERANCE:
+            return  # ignore very small overlap
+
+        # rewinding till particles have just started touching, in order to later solve the impact
+        dx = particle_1.particle_position.x - particle_2.particle_position.x
+        vx = particle_1.particle_velocity.x - particle_2.particle_velocity.x
+        dy = particle_1.particle_position.y - particle_2.particle_position.y
+        vy = particle_1.particle_velocity.y - particle_2.particle_velocity.y
+        r = particle_1.size + particle_2.size
+
+        # finding how far to "rewind"
+        rewind = (math.sqrt((-2 * dx * vx - 2 * dy * vy)**2 - 4*(vx**2 + vy**2) * (dx**2 + dy**2 - r**2)) + 2 * dx * vx + 2 * dy * vy)/(2 * (vx**2 + vy**2))
+
+        # updating positions
+        particle_1.particle_position = particle_1.particle_position - particle_1.particle_velocity*rewind
+        particle_2.particle_position = particle_2.particle_position - particle_2.particle_velocity*rewind
+
+    @staticmethod
     def particle_impact_transformation(particle_1: Particle, particle_2: Particle):
         impact_angle = (particle_1.particle_velocity - particle_2.particle_velocity).to_polar().phi
         velocity_a = particle_1.particle_velocity.rotation_transform(impact_angle)
@@ -247,6 +268,8 @@ class Orbit(arcade.Window):
         particle_2: Particle = None
         for particle_2 in self.particle_list:
             if not particle_2.checked() and ImpactHelper.is_particle_impact(particle_1, particle_2):
+                ImpactHelper.remove_overlap(particle_1, particle_2)
+
                 particle_1.impact_velocity = Vector2d(0, 0)
                 particle_2.impact_velocity = Vector2d(0, 0)
                 velocity_1, velocity_2, impact_angle = ImpactHelper.particle_impact_transformation(particle_1, particle_2)
